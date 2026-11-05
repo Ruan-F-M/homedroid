@@ -27,7 +27,7 @@ import java.net.URL
  * Android 12 and later once Homedroid itself installed the version being replaced.
  */
 object Updater {
-    private const val REPO = "sudiptacmd/homedroid"
+    private const val REPO = "Ruan-F-M/homedroid"
     private const val CHANNEL = "updates"
     private const val NOTIFICATION_ID = 2
     private const val CHECK_EVERY_MS = 6 * 3600_000L

@@ -108,6 +108,10 @@ after the first install without a prompt). The server comes back on the new vers
 - **Everything is a module.** Add, remove, turn on or off at any time. Nothing you don't use runs.
 - **Your storage, your choice.** Keep app data inside the app (no permissions needed) or put
   media and photos on internal storage, a **microSD card or a USB drive**, per app.
+- **App storage cleanup.** Settings can select user apps of at least 40 MiB until their combined
+  size reaches 2 GiB, then open Android's uninstall confirmation for each. Preinstalled system
+  apps are listed separately; they can only be disabled or have updates removed through Android
+  settings. Removing their system image requires ADB or root.
 - **Built to stay up.** A foreground service, wakelocks, start on boot, automatic restarts with
   backoff, and per-service logs. Crash loops show their reason right in the UI.
 - **Light.** One APK under 50 MB per ABI; apps are downloaded only when you install them.
@@ -153,10 +157,11 @@ everything it needs is inside the app.
   service with its logs and a restart button.
 - **Modules:** install, remove and turn modules on or off; set up Cloudflare Tunnel and
   Tailscale with built-in guides. **Clear data** resets an app like a fresh install.
-- **Files:** the media and photo libraries, the SSH home with your website, phone storage, and
-  **SD cards and USB drives**. Upload files or whole folders (drag and drop works), download
-  files or folders as zip, play videos and music and open pictures and PDFs in the browser,
-  rename, move and delete.
+- **Files:** one view across every online phone in a cluster, with a global name search and each
+  phone's media and photo libraries, SSH home, phone storage, **SD cards and USB drives**, and an
+  optional WebDAV location. Uploads from the unified view go to the reachable phone storage or
+  WebDAV account reporting the most free space. Locations without a reported quota remain
+  available for browsing and direct uploads, but are skipped for automatic placement.
 - **Terminal & SSH:** a terminal in the browser, in the phone's shell or straight into Alpine
   Linux; the SSH keys that may log in; a log of every SSH and terminal session (who, from where,
   what they ran, and rejected logins).
@@ -289,6 +294,14 @@ by themselves (or enter an address, for example over Tailscale). Both phones sho
 
 Phones talk over mutual TLS on port 8801 and trust only phones they were paired with. A phone
 in the cluster can fully control the others, so give each one a strong dashboard password.
+
+The **Files → All devices** view searches the local storage of every online phone at once. A newly
+paired phone appears automatically after it is approved. Configure an optional WebDAV endpoint
+separately on each phone under **Settings → WebDAV storage**; its credentials are encrypted with
+Android Keystore and never pass through the browser. If the WebDAV server does not report
+available quota, enter an approximate free-space value in that phone's WebDAV settings for
+automatic placement. Homedroid reduces that estimate after uploads through the panel; update it
+if you add or remove files elsewhere.
 
 ### Home-screen widget
 

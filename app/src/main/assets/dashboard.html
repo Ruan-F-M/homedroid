@@ -703,10 +703,11 @@ dialog[open] { animation: pop .14s var(--ease); }
     </section>
 
     <section data-view="files" class="hidden">
-      <div class="page-head"><div><h1>Files</h1><div class="sub">Move files between this device and the phone.</div></div></div>
+      <div class="page-head"><div class="grow"><h1>Files</h1><div class="sub">One library across paired phones and their configured WebDAV storage.</div></div><button class="btn" data-act="webdavSettings">WebDAV account</button></div>
       <div class="toolbar">
         <select id="fRoot" aria-label="Location"></select>
         <span class="hint" id="fFree"></span>
+        <input id="fSearch" type="search" placeholder="Search every device and cloud storage" aria-label="Search all files" style="width:min(300px,100%)">
         <div class="grow"></div>
         <button class="btn" data-act="mkdir" title="New folder"><svg class="i"><use href="#i-folder-plus"/></svg><span class="lbl">New folder</span></button>
         <button class="btn" data-act="pickDir" title="Upload a folder"><svg class="i"><use href="#i-folder"/></svg><span class="lbl">Upload folder</span></button>
@@ -725,7 +726,7 @@ dialog[open] { animation: pop .14s var(--ease); }
           <tbody id="fRows"></tbody>
         </table>
       </div>
-      <div class="hint" style="margin-top:10px">Drop files or folders on the list to upload them into the open folder. Folders download as zip files.</div>
+      <div class="hint" style="margin-top:10px">On All devices, uploads are distributed automatically. In a specific location, uploads go there. Folders download as zip files.</div>
     </section>
 
     <section data-view="ssh" class="hidden">
@@ -1493,8 +1494,9 @@ async function showLogs(svc, name) {
 $('#logs').addEventListener('close', () => clearInterval(logTimer));
 
 // ---- Files -----------------------------------------------------------------------------
-const files = {root: stored('filesRoot'), path: '', entries: [], sort: 'name', desc: false, uploads: [], active: null};
+const files = {root: stored('filesRoot'), path: '', entries: [], sort: 'name', desc: false, uploads: [], active: null, query: '', library: []};
 const fUrl = (path, dl = false) => `${apiBase()}files/${encodeURIComponent(files.root)}${dl ? '/download' : ''}?path=${encodeURIComponent(path)}`;
+const baseFor = id => id ? `/api/nodes/${encodeURIComponent(id)}/` : '/api/';
 const KINDS = {video: /\.(mp4|m4v|mkv|webm|mov|avi|ts|wmv)$/i, image: /\.(jpe?g|png|gif|webp|avif|heic|bmp|svg)$/i, audio: /\.(mp3|m4a|aac|flac|ogg|opus|wav)$/i, archive: /\.(zip|tar|gz|tgz|xz|7z|rar|iso|apk)$/i};
 const OPENABLE = /\.(mp4|m4v|webm|mov|mp3|m4a|aac|flac|ogg|opus|wav|jpe?g|png|gif|webp|avif|bmp|pdf|txt|log|srt|vtt|md|json|conf|ya?ml|csv|xml)$/i;
 const kind = name => Object.keys(KINDS).find(k => KINDS[k].test(name)) || 'file';
@@ -1504,15 +1506,30 @@ function goFiles(root, path) { location.hash = ['files', root, ...(path ? path.s
 /** Online phones other than this one's view: this phone first. */
 const clusterPhones = () => [{id: null, name: cluster?.self.name || 'This phone'}, ...(cluster?.members || []).filter(m => m.online)];
 async function renderFiles() {
-  // In a cluster, every phone's locations are offered, grouped by phone.
-  const others = (cluster?.members.length ? clusterPhones() : []).filter(p => p.id !== node);
-  const [roots, ...more] = await Promise.all([api('files'), ...others.map(p => api('files', {at: p.id}).catch(() => []))]);
-  if (!roots.some(r => r.id === files.root)) { files.root = roots[0]?.id; files.path = ''; }
+  const phones = clusterPhones();
+  const allRoots = await Promise.all(phones.map(async p => ({phone: p, roots: await api('files', {at: p.id}).catch(() => [])})));
+  const current = allRoots.find(x => x.phone.id === node) || allRoots[0] || {phone:{id:null,name:'This phone'},roots:[]};
+  const roots = current.roots;
+  const others = allRoots.filter(x => x.phone.id !== current.phone.id);
   const opts = (id, list) => list.map(r => `<option value="${esc(id || '')}|${esc(r.id)}">${esc(r.label)}</option>`).join('');
-  const current = cluster?.members.find(m => m.id === node)?.name || cluster?.self.name;
-  setHTML($('#fRoot'), others.length
-    ? `<optgroup label="${esc(current)}">${opts(node, roots)}</optgroup>` + others.map((p, i) => more[i].length ? `<optgroup label="${esc(p.name)}">${opts(p.id, more[i])}</optgroup>` : '').join('')
-    : opts(node, roots));
+  setHTML($('#fRoot'), `<option value="|*">All devices · automatic upload</option>`
+    + `<optgroup label="${esc(current.phone.name)}">${opts(current.phone.id, roots)}</optgroup>`
+    + others.map(x => x.roots.length ? `<optgroup label="${esc(x.phone.name)}">${opts(x.phone.id, x.roots)}</optgroup>` : '').join(''));
+  if (!files.root) files.root = '*';
+  if (files.root === '*') {
+    $('#fRoot').value = '|*'; $('#fFree').textContent = 'Search all locations · uploads distributed automatically';
+    files.library = allRoots.flatMap(({phone, roots}) => roots.map(root => ({...root, phone: phone.id, phoneName: phone.name})));
+    store('filesRoot', '*');
+    if ($('#fSearch').value !== files.query) $('#fSearch').value = files.query;
+    if (files.query.trim().length >= 2) {
+      const results = await Promise.all(phones.map(async p => ({phone:p, entries: await api(`files/search?q=${encodeURIComponent(files.query.trim())}`, {at:p.id}).catch(() => [])})));
+      files.entries = results.flatMap(({phone, entries}) => entries.map(e => ({...e, phone:phone.id, phoneName:phone.name})));
+      drawLibrarySearch();
+    } else drawLibraryRoots();
+    return;
+  }
+  const othersRoots = others;
+  if (!roots.some(r => r.id === files.root)) { files.root = roots[0]?.id; files.path = ''; }
   $('#fRoot').value = `${node || ''}|${files.root || ''}`;
   if (!files.root) {
     setHTML($('#fCrumbs'), '');
@@ -1524,10 +1541,45 @@ async function renderFiles() {
   catch (e) { if (files.path) { toast(e.message, true); return goFiles(files.root, ''); } throw e; }
   files.entries = d.entries;
   $('#fFree').textContent = bytes(d.free) + ' free';
+  if ($('#fSearch').value !== files.query) $('#fSearch').value = files.query;
   const parts = files.path ? files.path.split('/') : [];
   setHTML($('#fCrumbs'), [`<a data-act="cd" data-path="">${esc(d.label.replace(/ \(.*\)$/, ''))}</a>`]
     .concat(parts.map((p, i) => `<span class="sep">/</span><a data-act="cd" data-path="${esc(parts.slice(0, i + 1).join('/'))}">${esc(p)}</a>`)).join(''));
   drawFiles();
+}
+async function webdavSettings() {
+  try {
+    const saved = await api('files/webdav', {at:node});
+    const phone = cluster?.members.find(m => m.id === node)?.name || cluster?.self.name || 'This phone';
+    const state = saved.configured ? `A WebDAV account is configured on ${phone} (${saved.host || 'HTTPS endpoint'}).` : `No WebDAV account is configured on ${phone}.`;
+    await ask({title:'WebDAV storage', text:`${state}\n\nTo add or change credentials, open the Homedroid app on that phone → Settings → WebDAV storage. Credentials are saved in Android Keystore and never sent through the browser.` , confirm:'Close'});
+  } catch (e) { toast(e.message, true); }
+}
+function openLocation(phone, root, path = '') {
+  const target = phone || null;
+  files.query = ''; $('#fSearch').value = '';
+  if (target !== node) setNode(target);
+  files.root = root; files.path = path;
+  goFiles(root, path);
+}
+function drawLibraryRoots() {
+  setHTML($('#fCrumbs'), `<span>All files · ${files.library.length} locations</span>`);
+  const rows = files.library.map(r => `<tr><td><div class="fname"><span class="ficon dir">${icon('folder')}</span><a data-act="openLocation" data-phone="${esc(r.phone || '')}" data-root="${esc(r.id)}">${esc(r.phoneName)} · ${esc(r.label)}</a></div></td>
+    <td class="c-size">${r.free >= 0 ? bytes(r.free) + ' free' : 'quota unknown'}</td><td class="c-date"></td><td class="c-acts"></td></tr>`).join('');
+  setHTML($('#fRows'), rows || `<tr><td colspan="4"><div class="empty">No locations available yet. Pair another phone or configure WebDAV.</div></td></tr>`);
+}
+function drawLibrarySearch() {
+  setHTML($('#fCrumbs'), `<span>Search results for <b>${esc(files.query)}</b> · ${files.entries.length} found</span>`);
+  const entries = [...files.entries].sort((a,b) => a.name.localeCompare(b.name, undefined, {sensitivity:'base'}));
+  setHTML($('#fRows'), entries.map(e => {
+    const url = `${baseFor(e.phone)}files/${encodeURIComponent(e.root)}${e.dir ? '' : '/download'}?path=${encodeURIComponent(e.path)}`;
+    const label = `${e.phoneName} · ${e.label}`;
+    return `<tr><td><div class="fname"><span class="ficon ${e.dir ? 'dir' : kind(e.name)}">${icon(e.dir ? 'folder' : kind(e.name))}</span>${e.dir
+      ? `<a data-act="openLocation" data-phone="${esc(e.phone || '')}" data-root="${esc(e.root)}" data-path="${esc(e.path)}">${esc(e.name)}</a>`
+      : `<a href="${esc(url)}" download title="${esc(label)}">${esc(e.name)}</a>`}<span class="hint ellipsis">${esc(label)}</span></div></td>
+      <td class="c-size">${e.dir ? '' : bytes(e.size)}</td><td class="c-date">${e.modified ? dateFmt.format(e.modified) : ''}</td>
+      <td class="c-acts">${e.dir ? '' : `<a class="btn ghost sm icon wide" href="${esc(url)}" download title="Download">${icon('download')}</a>`}</td></tr>`;
+  }).join('') || `<tr><td colspan="4"><div class="empty">No matching files. Offline phones and disconnected WebDAV accounts are skipped.</div></td></tr>`);
 }
 function drawFiles() {
   const {sort, desc} = files, dir = desc ? -1 : 1;
@@ -1548,8 +1600,8 @@ function drawFiles() {
         <td class="c-acts"><div class="acts">
           ${!e.dir && OPENABLE.test(e.name) ? `<a class="btn ghost sm icon wide" href="${url}&amp;inline=1" target="_blank" rel="noopener" title="Open in the browser" aria-label="Open">${icon('external')}</a>` : ''}
           <a class="btn ghost sm icon wide" href="${url}" ${e.dir ? '' : 'download'} title="${e.dir ? 'Download as zip' : 'Download'}" aria-label="Download">${icon('download')}</a>
-          <button class="btn ghost sm icon wide" data-act="rename" data-path="${esc(p)}" title="Rename or move" aria-label="Rename">${icon('edit')}</button>
-          <button class="btn ghost sm icon" data-act="fileMenu" data-path="${esc(p)}" data-dir="${e.dir}" title="More" aria-label="More">${icon('more')}</button>
+          ${files.root === 'webdav-storage' ? '' : `<button class="btn ghost sm icon wide" data-act="rename" data-path="${esc(p)}" title="Rename or move" aria-label="Rename">${icon('edit')}</button>
+          <button class="btn ghost sm icon" data-act="fileMenu" data-path="${esc(p)}" data-dir="${e.dir}" title="More" aria-label="More">${icon('more')}</button>`}
         </div></td></tr>`;
     }).join('')
     + (list.length ? '' : `<tr><td colspan="4"><div class="empty">${icon('folder')}<div>This folder is empty. Drop files here to upload.</div></div></td></tr>`));
@@ -1574,13 +1626,24 @@ async function removeFile(p, dir) {
 function queueUploads(items) {
   if (!items.length) return;
   const root = files.root, base = files.path;
-  for (const {file, rel} of items) files.uploads.push({file, api: apiBase(), root, path: join(base, rel || file.name), loaded: 0, state: 'waiting'});
+  for (const {file, rel} of items) files.uploads.push({file, api: apiBase(), root, path: join(root === '*' ? '' : base, rel || file.name), loaded: 0, state: 'waiting', auto:root === '*'});
   drawTray(); nextUpload();
 }
-function nextUpload() {
+async function nextUpload() {
   if (files.active) return;
   const u = files.uploads.find(x => x.state === 'waiting');
   if (!u) { if (tab === 'files') refresh(); return; }
+  if (u.auto) {
+    u.state = 'choosing'; drawTray();
+    const candidates = [];
+    for (const p of clusterPhones()) {
+      try { const roots = await api(`files/targets?size=${u.file.size}`, {at:p.id}); candidates.push(...roots.map(r => ({...r, phone:p.id, phoneName:p.name}))); } catch (_) {}
+    }
+    candidates.sort((a,b) => b.free - a.free);
+    const target = candidates[0];
+    if (!target) { u.state = 'failed: enable shared storage access or set WebDAV free space'; drawTray(); return nextUpload(); }
+    u.api = baseFor(target.phone); u.root = target.id; u.destination = `${target.phoneName} · ${target.label}`;
+  }
   files.active = u; u.state = 'sending';
   let last = 0;
   const finish = () => { files.active = null; u.xhr = null; drawTray(); nextUpload(); };
@@ -1591,13 +1654,13 @@ function nextUpload() {
     // Redrawing on every progress event is wasted work; 4 times a second is plenty.
     x.upload.onprogress = e => { u.loaded = e.loaded; const now = performance.now(); if (now - last > 250) { last = now; drawTray(); } };
     x.onload = async () => {
-      if (x.status === 409 && !overwrite) {
+      if (x.status === 409 && !overwrite && !u.auto) {
         const r = await ask({title: `Replace ${u.path.split('/').pop()}?`, text: 'A file with this name already exists here.', confirm: 'Replace'});
         if (r) return send(true);
         u.state = 'skipped'; return finish();
       }
       let err = ''; try { err = JSON.parse(x.responseText).error || ''; } catch (e) {}
-      u.state = x.status < 300 ? 'done' : 'failed: ' + (err || x.status);
+      u.state = x.status < 300 ? 'done' + (u.destination ? ` · ${u.destination}` : '') : 'failed: ' + (err || x.status);
       if (x.status === 401) showLogin();
       finish();
     };
@@ -1611,7 +1674,7 @@ function drawTray() {
   const ups = files.uploads, tray = $('#fTray');
   tray.classList.toggle('hidden', !ups.length);
   if (!ups.length) return;
-  const left = ups.filter(u => u.state === 'waiting' || u.state === 'sending');
+  const left = ups.filter(u => u.state === 'waiting' || u.state === 'choosing' || u.state === 'sending');
   const total = ups.reduce((s, u) => s + u.file.size, 0), sent = ups.reduce((s, u) => s + (u.state === 'done' ? u.file.size : u.state === 'sending' ? u.loaded : 0), 0);
   tray.innerHTML = `<div class="job-head">${left.length ? '<span class="spinner"></span>' : `<span style="color:var(--ok)">${icon('check')}</span>`}
       <div class="grow"><div style="font-weight:600">${left.length ? `Uploading ${left.length} file${left.length > 1 ? 's' : ''}` : 'Uploads finished'}</div>
@@ -1619,7 +1682,7 @@ function drawTray() {
       ${left.length ? '<button class="btn sm" data-act="cancelUploads">Cancel</button>' : '<button class="btn ghost sm" data-act="clearUploads">Dismiss</button>'}</div>`
     + ups.slice(-6).map(u => {
       const pct = u.state === 'done' ? 100 : u.file.size ? Math.floor(100 * u.loaded / u.file.size) : 0;
-      return `<div class="up"><span class="ellipsis">${esc(u.path)}</span><span class="muted">${u.state === 'sending' ? pct + '%' : esc(u.state)}</span>
+      return `<div class="up"><span class="ellipsis">${esc(u.path)}${u.destination ? ` · ${esc(u.destination)}` : ''}</span><span class="muted">${u.state === 'sending' ? pct + '%' : esc(u.state)}</span>
         <div class="meter ${u.state.startsWith('failed') ? 'bad' : 'ok'}"><i style="width:${pct}%"></i></div></div>`;
     }).join('');
 }
@@ -1627,9 +1690,13 @@ addEventListener('beforeunload', e => { if (files.active) e.preventDefault(); })
 $('#fRoot').onchange = e => {
   // "<phone>|<location>": a location on another phone switches to managing that phone.
   const [phone, root] = e.target.value.split('|');
+  if (root === '*') { files.root = '*'; files.path = ''; files.query = $('#fSearch').value; store('filesRoot', '*'); if (node) setNode(null); else refresh(); return; }
+  files.query = ''; $('#fSearch').value = '';
   if ((phone || null) !== node) setNode(phone || null);
   goFiles(root, '');
 };
+let fileSearchTimer = 0;
+$('#fSearch').oninput = () => { files.query = $('#fSearch').value; if (files.root !== '*') { files.root = '*'; files.path = ''; store('filesRoot', '*'); } clearTimeout(fileSearchTimer); fileSearchTimer = setTimeout(() => { if (tab === 'files') refresh(); }, 450); };
 
 // Copies between phones run on the receiving phone; follow them here until they finish.
 const xfer = {watch: [], timer: 0};
@@ -2390,6 +2457,8 @@ const ACT = {
     if (r) run(api(`deploys/${b.dataset.id}`, {method: 'DELETE'}), 'Deleting ' + b.dataset.name);
   },
   cd: b => goFiles(files.root, b.dataset.path),
+  openLocation: b => openLocation(b.dataset.phone, b.dataset.root, b.dataset.path || ''),
+  webdavSettings,
   mkdir,
   rename: b => rename(b.dataset.path),
   fileMenu(b) {

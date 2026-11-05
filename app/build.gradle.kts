@@ -41,8 +41,8 @@ android {
         applicationId = if (providers.gradleProperty("cameraTest").orNull == "true") "dev.homedroid.cameratest" else "dev.homedroid"
         minSdk = 29
         targetSdk = 36
-        versionCode = 904
-        versionName = "0.9.4-beta"
+        versionCode = 906
+        versionName = "0.9.6-beta"
         testInstrumentationRunner = "dev.homedroid.CameraHardwareTest"
     }
 
@@ -72,7 +72,7 @@ android {
             isEnable = true
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = true
+            isUniversalApk = false
         }
     }
 

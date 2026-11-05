@@ -58,6 +58,7 @@ class FileBrowser(private val ctx: Context, private val paths: Paths) {
     private val cfg = Config(ctx)
     private val apps = Apps(ctx, paths)
     private val alpine = Alpine(ctx, paths)
+    private val webdav = WebDavStorage(ctx)
 
     fun roots(): List<FileRoot> = buildList {
         for ((key, group) in apps.installed().filter { it.storagePath != null }.groupBy { it.storageKey }) {
@@ -83,7 +84,11 @@ class FileBrowser(private val ctx: Context, private val paths: Paths) {
         if (seg.isEmpty()) return Response.json(jsonArray(roots().map { root ->
             JSONObject().put("id", root.id).put("label", root.label)
                 .put("free", root.dir.usableSpace).put("total", root.dir.totalSpace)
-        }))
+        } + webDavRootInfo()))
+        if (seg == listOf("webdav")) return webDavSettings(r)
+        if (seg == listOf("search") && r.method == "GET") return search(r.query["q"].orEmpty())
+        if (seg == listOf("targets") && r.method == "GET") return targets(r.query["size"]?.toLongOrNull() ?: 0L)
+        if (seg.firstOrNull() == "webdav-storage") return webDavHandle(r, seg.drop(1))
         if (seg == listOf("transfers") && r.method == "GET") return Response.json(Transfers.json())
         val root = roots().firstOrNull { it.id == seg[0] } ?: return Response.error(404, "no such location")
         if (seg.getOrNull(1) == "pack" && r.method == "GET") return pack(r, root)
@@ -118,6 +123,88 @@ class FileBrowser(private val ctx: Context, private val paths: Paths) {
             }
             else -> Response.error(404, "no such endpoint")
         }
+    }
+
+    private fun webDavRootInfo(): List<JSONObject> {
+        if (!webdav.configured()) return emptyList()
+        return listOf(JSONObject().put("id", "webdav-storage").put("label", "WebDAV storage")
+            .put("free", webdav.manualFreeBytes.takeIf { it > 0 } ?: -1).put("total", -1).put("remote", true))
+    }
+
+    private fun webDavSettings(r: Request): Response = when (r.method) {
+        "GET" -> Response.json(webdav.publicConfig())
+        else -> Response.error(404, "Configure WebDAV in the phone's Settings")
+    }
+
+    private fun webDavHandle(r: Request, seg: List<String>): Response {
+        val path = r.query["path"].orEmpty().trim('/')
+        return try {
+            when {
+                r.method == "GET" && seg == listOf("download") -> webdav.download(path, r.headers["range"])
+                r.method == "GET" && seg.isEmpty() -> {
+                    val (items, free) = webdav.list(path)
+                    Response.json(JSONObject().put("root", "webdav-storage").put("label", "WebDAV storage")
+                        .put("free", free ?: -1).put("entries", jsonArray(items.map { e ->
+                            JSONObject().put("name", e.name).put("dir", e.dir).put("size", e.size).put("modified", e.modified)
+                        })))
+                }
+                r.method == "PUT" && seg.isEmpty() -> webdav.upload(r, path)
+                r.method == "POST" && seg == listOf("mkdir") -> webdav.mkdir(path)
+                else -> Response.error(404, "No such WebDAV operation")
+            }
+        } catch (e: Exception) { Response.error(502, e.message ?: "WebDAV request failed") }
+    }
+
+    /** Search this phone's local roots and configured WebDAV storage, with bounded work. */
+    private fun search(query: String): Response {
+        val q = query.trim()
+        if (q.length < 2 || q.length > 120) return Response.json(jsonArray(emptyList<JSONObject>()))
+        val found = mutableListOf<JSONObject>()
+        val lower = q.lowercase()
+        var visited = 0
+        val seenLocal = mutableSetOf<String>()
+        val localLimit = if (webdav.configured()) 75 else 100
+        for (root in roots()) {
+            val todo = ArrayDeque<Pair<File, Int>>().apply { add(root.dir to 0) }
+            var rootMatches = 0
+            while (todo.isNotEmpty() && found.size < localLimit && rootMatches < 25 && visited < 10_000) {
+                val (dir, depth) = todo.removeFirst(); visited++
+                for (f in dir.listFiles().orEmpty()) {
+                    if (f.name.contains(lower, ignoreCase = true)) {
+                        val canonical = try { f.canonicalPath } catch (_: IOException) { f.absolutePath }
+                        if (seenLocal.add(canonical)) {
+                            val rel = root.dir.toPath().relativize(f.toPath()).toString().replace(File.separatorChar, '/')
+                            found += JSONObject().put("root", root.id).put("label", root.label).put("path", rel)
+                                .put("name", f.name).put("dir", f.isDirectory).put("size", if (f.isDirectory) 0 else f.length())
+                                .put("modified", f.lastModified())
+                            rootMatches++
+                        }
+                    }
+                    if (f.isDirectory && depth < 16 && !Files.isSymbolicLink(f.toPath())) todo.add(f to depth + 1)
+                    if (found.size >= localLimit || rootMatches >= 25) break
+                }
+            }
+        }
+        if (found.size < 100 && visited < 10_000 && webdav.configured()) {
+            val remote = try { webdav.search(q, 100 - found.size) } catch (_: Exception) { emptyList() }
+            for (e in remote) {
+                found += JSONObject().put("root", "webdav-storage").put("label", "WebDAV storage").put("path", e.path)
+                    .put("name", e.name).put("dir", e.dir).put("size", e.size).put("modified", e.modified)
+            }
+        }
+        return Response.json(jsonArray(found))
+    }
+
+    private fun targets(size: Long): Response {
+        val candidates = roots().filter { it.id == "phone" || it.id.startsWith("volume") }.mapNotNull { root ->
+            val free = root.dir.usableSpace
+            if (free < size) null else JSONObject().put("id", root.id).put("label", root.label).put("free", free)
+        }.toMutableList()
+        if (webdav.configured()) {
+            val free = try { webdav.list("").second ?: webdav.manualFreeBytes.takeIf { it > 0 } } catch (_: Exception) { null }
+            if (free != null && free >= size) candidates += JSONObject().put("id", "webdav-storage").put("label", "WebDAV storage").put("free", free)
+        }
+        return Response.json(jsonArray(candidates))
     }
 
     /**
